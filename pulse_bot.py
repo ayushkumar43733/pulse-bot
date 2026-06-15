@@ -64,8 +64,8 @@ YOUTUBE_EMOJI = "<:562823youtube:1516115061545107649>"
 # --- TEST MODE ---
 # Set these to True to send a one-time test notification on startup,
 # regardless of actual live/upload status. Set back to False after testing.
-TEST_YOUTUBE_LIVE_PING = True
-TEST_YOUTUBE_UPLOAD_PING = True
+TEST_YOUTUBE_LIVE_PING = False
+TEST_YOUTUBE_UPLOAD_PING = False
 
 # =========================
 # END CONFIG
