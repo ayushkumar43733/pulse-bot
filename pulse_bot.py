@@ -36,7 +36,7 @@ DISCORD_VIDEOS_CHANNEL_ID = int(os.environ.get("DISCORD_VIDEOS_CHANNEL_ID", "106
 # Role to ping for live alerts.
 # TESTING: currently set to Server Head role. Swap to the real
 # "Live Notification" role ID (1293949784767336532) once verified.
-DISCORD_LIVE_ROLE_ID = int(os.environ.get("DISCORD_LIVE_ROLE_ID", "1341272225399181382"))
+DISCORD_LIVE_ROLE_ID = int(os.environ.get("DISCORD_LIVE_ROLE_ID", "1293949784767336532"))
 
 # Custom Kick emoji
 KICK_EMOJI = "<:201195kick:1515955910021742662>"
