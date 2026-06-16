@@ -15,6 +15,7 @@ as an environment variable (DISCORD_BOT_TOKEN) - never hardcode it.
 """
 
 import os
+import html
 import requests
 import discord
 from discord.ext import tasks
@@ -154,7 +155,7 @@ def is_youtube_live():
         if items:
             item = items[0]
             video_id = item["id"]["videoId"]
-            title = item["snippet"]["title"]
+            title = html.unescape(item["snippet"]["title"])
             thumbnail_url = item["snippet"]["thumbnails"]["high"]["url"]
             return True, video_id, title, thumbnail_url
 
@@ -258,7 +259,7 @@ def get_latest_upload():
 
         snippet = items[0]["snippet"]
         video_id = snippet["resourceId"]["videoId"]
-        title = snippet["title"]
+        title = html.unescape(snippet["title"])
         thumbnail_url = snippet["thumbnails"]["high"]["url"]
 
         # --- Check if this is a live stream or premiere (skip if so) ---
@@ -445,16 +446,16 @@ async def on_ready():
         last_seen_video_id = initial_video_id
         print(f"[INFO] Startup check: latest YouTube video recorded ({initial_title}).")
 
-    # Set initial status
-    if kick_live_now:
-        await client.change_presence(
-            status=discord.Status.online,
-            activity=discord.Streaming(name=kick_title, url=f"https://kick.com/{KICK_SLUG}"),
-        )
-    elif yt_live_now:
+    # Set initial status — YouTube takes priority if live on both
+    if yt_live_now:
         await client.change_presence(
             status=discord.Status.online,
             activity=discord.Streaming(name=yt_title, url=f"https://www.youtube.com/@{KICK_SLUG}"),
+        )
+    elif kick_live_now:
+        await client.change_presence(
+            status=discord.Status.online,
+            activity=discord.Streaming(name=kick_title, url=f"https://kick.com/{KICK_SLUG}"),
         )
     else:
         await set_rotating_status()
