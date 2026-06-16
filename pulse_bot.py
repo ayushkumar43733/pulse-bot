@@ -313,33 +313,56 @@ async def send_youtube_upload_notification(video_id, title, thumbnail_url):
         allowed_mentions=discord.AllowedMentions(everyone=True),
     )
     print("[INFO] Sent YouTube upload notification to Discord.")
-
-
+ 
+ 
+async def set_rotating_status():
+    """Sets the bot's presence to the next status in the rotation."""
+    global status_index
+    activity_type, text = ROTATING_STATUSES[status_index % len(ROTATING_STATUSES)]
+    status_index += 1
+ 
+    type_map = {
+        "watching":   discord.ActivityType.watching,
+        "listening":  discord.ActivityType.listening,
+        "playing":    discord.ActivityType.playing,
+        "competing":  discord.ActivityType.competing,
+    }
+    activity = discord.Activity(type=type_map.get(activity_type, discord.ActivityType.watching), name=text)
+    await client.change_presence(status=discord.Status.online, activity=activity)
+ 
+ 
 @tasks.loop(seconds=CHECK_INTERVAL_SECONDS)
 async def check_kick_status():
     global was_live
-
+ 
     live_now, title, thumbnail_url, viewers = is_channel_live()
-
+ 
     if live_now and not was_live:
         print(f"[INFO] Klurge just went live: {title}")
         await send_live_notification(title, thumbnail_url, viewers)
-        # Update bot status to reflect live state
+        # Pause rotation and show streaming status
+        if rotate_status.is_running():
+            rotate_status.cancel()
         await client.change_presence(
             status=discord.Status.online,
-            activity=discord.Streaming(name=f"{title}", url=f"https://kick.com/{KICK_SLUG}"),
+            activity=discord.Streaming(name=title, url=f"https://kick.com/{KICK_SLUG}"),
         )
-
+ 
     elif not live_now and was_live:
-        print("[INFO] Klurge went offline.")
-        await client.change_presence(
-            status=discord.Status.online,
-            activity=discord.Activity(type=discord.ActivityType.watching, name="kick.com/klurge"),
-        )
-
+        print("[INFO] Klurge went offline. Resuming status rotation.")
+        if not rotate_status.is_running():
+            rotate_status.start()
+ 
     was_live = live_now
-
-
+ 
+ 
+@tasks.loop(seconds=STATUS_ROTATE_INTERVAL_SECONDS)
+async def rotate_status():
+    # Only rotate when not live (Kick live check handles live status separately)
+    if not was_live and not was_youtube_live:
+        await set_rotating_status()
+ 
+ 
 # Tracks whether Klurge was live on YouTube on the previous check
 was_youtube_live = False
 
