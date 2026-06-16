@@ -67,6 +67,22 @@ YOUTUBE_EMOJI = "<:562823youtube:1516115061545107649>"
 TEST_YOUTUBE_LIVE_PING = False
 TEST_YOUTUBE_UPLOAD_PING = False
 
+# --- ROTATING STATUS ---
+# How often to rotate the bot's Discord status (seconds). 60 = 1 minutes.
+STATUS_ROTATE_INTERVAL_SECONDS = 60
+ 
+# Cycles through these when Klurge is NOT live.
+# Format: (activity_type, text)
+ROTATING_STATUSES = [
+    ("watching",   "kick.com/klurge"),
+    ("watching",   "youtube.com/@klurge"),
+    ("playing",    "Valorant w/ Klurge"),
+    ("listening",  "Klurge's Korner"),
+    ("watching",   "Klurge cook in Valorant"),
+    ("competing",  "Klurge's ranked games"),
+    ("watching",   "Made by Ayush 💚"),
+]
+
 # =========================
 # END CONFIG
 # =========================
