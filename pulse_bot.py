@@ -349,7 +349,7 @@ async def check_kick_status():
             rotate_status.cancel()
         await client.change_presence(
             status=discord.Status.online,
-            activity=discord.Streaming(name=title, url="https://youtube.com/@Klurge"),
+            activity=discord.Streaming(name=title, url="https://www.twitch.tv/klurge11"),
         )
 
     elif not live_now and was_live:
@@ -388,7 +388,7 @@ async def check_youtube_live_status():
             rotate_status.cancel()
         await client.change_presence(
             status=discord.Status.online,
-            activity=discord.Streaming(name=title, url="https://youtube.com/@Klurge"),
+            activity=discord.Streaming(name=title, url="https://www.twitch.tv/klurge11"),
         )
 
     elif not live_now and was_youtube_live:
@@ -450,12 +450,12 @@ async def on_ready():
     if yt_live_now:
         await client.change_presence(
             status=discord.Status.online,
-            activity=discord.Streaming(name=yt_title, url="https://youtube.com/@Klurge"),
+            activity=discord.Streaming(name=yt_title, url="https://www.twitch.tv/klurge11"),
         )
     elif kick_live_now:
         await client.change_presence(
             status=discord.Status.online,
-            activity=discord.Streaming(name=kick_title, url="https://youtube.com/@Klurge"),
+            activity=discord.Streaming(name=kick_title, url="https://www.twitch.tv/klurge11"),
         )
     else:
         await set_rotating_status()
