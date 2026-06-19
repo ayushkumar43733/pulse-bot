@@ -37,7 +37,7 @@ DISCORD_VIDEOS_CHANNEL_ID = int(os.environ.get("DISCORD_VIDEOS_CHANNEL_ID", "106
 # Role to ping for live alerts.
 # TESTING: currently set to Server Head role. Swap to the real
 # "Live Notification" role ID (1293949784767336532) once verified.
-DISCORD_LIVE_ROLE_ID = int(os.environ.get("DISCORD_LIVE_ROLE_ID", "1293949784767336532"))
+DISCORD_LIVE_ROLE_ID = int(os.environ.get("DISCORD_LIVE_ROLE_ID", "1341272225399181382"))
 
 # Custom Kick emoji
 KICK_EMOJI = "<:201195kick:1515955910021742662>"
@@ -104,6 +104,10 @@ was_live = False
 # Tracks the current index in ROTATING_STATUSES
 status_index = 0
 
+# Tracks video IDs that were YouTube livestreams — excluded from upload notifications
+# since YouTube converts ended streams into VODs which would falsely trigger uploads
+seen_livestream_ids = set()
+
 
 def is_channel_live():
     """
@@ -157,6 +161,8 @@ def is_youtube_live():
             video_id = item["id"]["videoId"]
             title = html.unescape(item["snippet"]["title"])
             thumbnail_url = item["snippet"]["thumbnails"]["high"]["url"]
+            # Track this video ID so upload checker ignores it when stream ends
+            seen_livestream_ids.add(video_id)
             return True, video_id, title, thumbnail_url
 
         return False, None, None, None
@@ -262,7 +268,16 @@ def get_latest_upload():
         title = html.unescape(snippet["title"])
         thumbnail_url = snippet["thumbnails"]["high"]["url"]
 
-        # --- Check if this is a live stream or premiere (skip if so) ---
+        # --- Skip if this video was a known YouTube livestream ---
+        # When a stream ends, YouTube converts it to a VOD with
+        # liveBroadcastContent = "none", which would falsely trigger
+        # an upload notification. We track all seen livestream IDs
+        # and permanently exclude them.
+        if video_id in seen_livestream_ids:
+            print(f"[INFO] Skipping upload notification — this is a known livestream VOD: {title}")
+            return None, None, None
+
+        # --- Check if currently live or upcoming (skip if so) ---
         videos_url = "https://www.googleapis.com/youtube/v3/videos"
         videos_params = {
             "part": "snippet",
@@ -278,6 +293,8 @@ def get_latest_upload():
             live_broadcast_content = video_items[0]["snippet"].get("liveBroadcastContent", "none")
             if live_broadcast_content in ("live", "upcoming"):
                 print(f"[INFO] Latest playlist item is a live/upcoming stream, skipping upload notification: {title}")
+                # Also add to seen_livestream_ids as a safety net
+                seen_livestream_ids.add(video_id)
                 return None, None, None
 
         return video_id, title, thumbnail_url
@@ -349,7 +366,7 @@ async def check_kick_status():
             rotate_status.cancel()
         await client.change_presence(
             status=discord.Status.online,
-            activity=discord.Streaming(name=title, url="https://www.twitch.tv/klurge11"),
+            activity=discord.Streaming(name=title, url="https://twitch.tv/klurge11"),
         )
 
     elif not live_now and was_live:
@@ -388,7 +405,7 @@ async def check_youtube_live_status():
             rotate_status.cancel()
         await client.change_presence(
             status=discord.Status.online,
-            activity=discord.Streaming(name=title, url="https://www.twitch.tv/klurge11"),
+            activity=discord.Streaming(name=title, url="https://twitch.tv/klurge11"),
         )
 
     elif not live_now and was_youtube_live:
@@ -435,9 +452,10 @@ async def on_ready():
     if kick_live_now:
         print(f"[INFO] Startup check: Klurge is already live on Kick ({kick_title}). Will not re-notify.")
 
-    yt_live_now, _, yt_title, _ = is_youtube_live()
+    yt_live_now, yt_video_id, yt_title, _ = is_youtube_live()
     was_youtube_live = yt_live_now
     if yt_live_now:
+        seen_livestream_ids.add(yt_video_id)
         print(f"[INFO] Startup check: Klurge is already live on YouTube ({yt_title}). Will not re-notify.")
 
     # Record current latest video so we don't treat it as "new" on first upload check
@@ -450,12 +468,12 @@ async def on_ready():
     if yt_live_now:
         await client.change_presence(
             status=discord.Status.online,
-            activity=discord.Streaming(name=yt_title, url="https://www.twitch.tv/klurge11"),
+            activity=discord.Streaming(name=yt_title, url="https://twitch.tv/klurge11"),
         )
     elif kick_live_now:
         await client.change_presence(
             status=discord.Status.online,
-            activity=discord.Streaming(name=kick_title, url="https://www.twitch.tv/klurge11"),
+            activity=discord.Streaming(name=kick_title, url="https://twitch.tv/klurge11"),
         )
     else:
         await set_rotating_status()
