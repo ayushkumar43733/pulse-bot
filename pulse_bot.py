@@ -679,6 +679,7 @@ async def on_ready():
 
     # --- Sync slash commands to the server (guild sync = near-instant) ---
     try:
+        tree.copy_global_to(guild=discord.Object(id=GUILD_ID))
         synced = await tree.sync(guild=discord.Object(id=GUILD_ID))
         print(f"[INFO] Synced {len(synced)} slash command(s).")
     except Exception as e:
