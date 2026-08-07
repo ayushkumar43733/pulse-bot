@@ -687,6 +687,7 @@ async def post_application_panel(interaction: discord.Interaction):
         ),
         color=0x9B59B6,
     )
+    embed.set_image(url="https://raw.githubusercontent.com/ayushkumar43733/pulse-bot/main/klurge_banner.webp")
     msg = await interaction.channel.send(embed=embed, view=ApplyPanelView())
     last_application_panel["channel_id"] = msg.channel.id
     last_application_panel["message_id"] = msg.id
