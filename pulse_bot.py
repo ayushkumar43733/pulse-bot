@@ -18,6 +18,7 @@ as an environment variable (DISCORD_BOT_TOKEN) - never hardcode it.
 """
 
 import os
+import re
 import html
 import requests
 import discord
@@ -96,6 +97,12 @@ ROTATING_STATUSES = [
 GUILD_ID = int(os.environ.get("GUILD_ID", "PASTE_YOUR_SERVER_ID_HERE"))
 APPLICATIONS_STAFF_CHANNEL_ID = int(os.environ.get("APPLICATIONS_STAFF_CHANNEL_ID", "PASTE_YOUR_STAFF_CHANNEL_ID_HERE"))
 
+# Role given to applicants when "Approve for Team" is clicked. Also used by
+# /approved_members to list the current team. Create a role (e.g. "Event
+# Team") and paste its ID here. The bot's own role must sit ABOVE this role
+# in Server Settings -> Roles, or it won't be able to assign it.
+EVENT_TEAM_ROLE_ID = int(os.environ.get("EVENT_TEAM_ROLE_ID", "PASTE_YOUR_EVENT_TEAM_ROLE_ID_HERE"))
+
 # =========================
 # END CONFIG
 # =========================
@@ -108,6 +115,7 @@ HEADERS_KICK = {
 }
 
 intents = discord.Intents.default()
+intents.members = True  # required for /approved_members to see who has the role
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
@@ -417,11 +425,12 @@ class ApplicationModal(discord.ui.Modal, title="Event Team Application"):
         max_length=500,
     )
 
-    def __init__(self, roles_selected, age_selected, activity_selected):
+    def __init__(self, roles_selected, age_selected, activity_selected, origin_interaction):
         super().__init__()
         self.roles_selected = roles_selected
         self.age_selected = age_selected
         self.activity_selected = activity_selected
+        self.origin_interaction = origin_interaction  # the original "Apply Now" click
 
     async def on_submit(self, interaction: discord.Interaction):
         staff_channel = client.get_channel(APPLICATIONS_STAFF_CHANNEL_ID)
@@ -466,6 +475,13 @@ class ApplicationModal(discord.ui.Modal, title="Event Team Application"):
             ephemeral=True,
         )
 
+        # Clean up the earlier "answer these 3 questions" message so only
+        # this thank-you message is left behind.
+        try:
+            await self.origin_interaction.delete_original_response()
+        except Exception as e:
+            print(f"[WARN] Could not delete original application prompt: {e}")
+
 
 class ApplicationSelectView(discord.ui.View):
     """Shown right after clicking 'Apply Now'. Collects role/age/activity
@@ -473,8 +489,9 @@ class ApplicationSelectView(discord.ui.View):
     it's a short-lived step (10 min timeout), so it doesn't need to
     survive a bot restart."""
 
-    def __init__(self):
+    def __init__(self, origin_interaction):
         super().__init__(timeout=600)
+        self.origin_interaction = origin_interaction  # the "Apply Now" click, kept to clean up later
         self.roles_selected = None
         self.age_selected = None
         self.activity_selected = None
@@ -489,6 +506,10 @@ class ApplicationSelectView(discord.ui.View):
     async def select_roles(self, interaction: discord.Interaction, select: discord.ui.Select):
         labels = [label for label, value in ROLE_OPTIONS if value in select.values]
         self.roles_selected = ", ".join(labels)
+        # Mark the chosen option(s) as the default so the closed dropdown
+        # displays them instead of reverting to the placeholder text.
+        for option in select.options:
+            option.default = option.value in select.values
         await interaction.response.edit_message(view=self)
 
     @discord.ui.select(
@@ -500,6 +521,8 @@ class ApplicationSelectView(discord.ui.View):
     )
     async def select_age(self, interaction: discord.Interaction, select: discord.ui.Select):
         self.age_selected = select.values[0]
+        for option in select.options:
+            option.default = option.label == self.age_selected
         await interaction.response.edit_message(view=self)
 
     @discord.ui.select(
@@ -511,6 +534,8 @@ class ApplicationSelectView(discord.ui.View):
     )
     async def select_activity(self, interaction: discord.Interaction, select: discord.ui.Select):
         self.activity_selected = select.values[0]
+        for option in select.options:
+            option.default = option.label == self.activity_selected
         await interaction.response.edit_message(view=self)
 
     @discord.ui.button(label="Continue →", style=discord.ButtonStyle.success, row=3)
@@ -522,7 +547,7 @@ class ApplicationSelectView(discord.ui.View):
             )
             return
         await interaction.response.send_modal(
-            ApplicationModal(self.roles_selected, self.age_selected, self.activity_selected)
+            ApplicationModal(self.roles_selected, self.age_selected, self.activity_selected, self.origin_interaction)
         )
 
 
@@ -538,14 +563,35 @@ class ApplyPanelView(discord.ui.View):
     async def apply_now(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
             "Answer these three quick questions, then hit **Continue** to finish your application:",
-            view=ApplicationSelectView(),
+            view=ApplicationSelectView(interaction),
             ephemeral=True,
         )
 
 
+def extract_user_id_from_embed(embed):
+    """Pulls the applicant's Discord user ID back out of the 'User ID: ...'
+    footer text we stamped onto the application card."""
+    if not embed.footer or not embed.footer.text:
+        return None
+    match = re.search(r"User ID:\s*(\d+)", embed.footer.text)
+    return int(match.group(1)) if match else None
+
+
+async def dm_applicant(user_id, message):
+    """Best-effort DM — silently logs (doesn't crash) if the user has DMs
+    closed or has left the server."""
+    try:
+        user = await client.fetch_user(user_id)
+        await user.send(message)
+        return True
+    except Exception as e:
+        print(f"[WARN] Could not DM user {user_id}: {e}")
+        return False
+
+
 class ReviewButtonView(discord.ui.View):
-    """Persistent view — 'Mark Reviewed' button attached to each
-    application card in the staff channel."""
+    """Persistent view — 'Mark Reviewed' and 'Approve for Team' buttons
+    attached to each application card in the staff channel."""
 
     def __init__(self):
         super().__init__(timeout=None)
@@ -553,6 +599,8 @@ class ReviewButtonView(discord.ui.View):
     @discord.ui.button(label="Mark Reviewed", style=discord.ButtonStyle.secondary, custom_id="pulse_mark_reviewed_button", emoji="✅")
     async def mark_reviewed(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = interaction.message.embeds[0]
+        user_id = extract_user_id_from_embed(embed)
+
         embed.colour = 0x2ECC71
         existing_footer = embed.footer.text if embed.footer else ""
         if "Reviewed by" not in existing_footer:
@@ -560,6 +608,63 @@ class ReviewButtonView(discord.ui.View):
         button.label = "Reviewed ✓"
         button.disabled = True
         await interaction.response.edit_message(embed=embed, view=self)
+
+        if user_id:
+            await dm_applicant(
+                user_id,
+                "Hey! Just a quick update — your Klurge's Korner Event Team application has been reviewed. "
+                "We'll reach out if we'd like to move forward. Thanks for your patience! 💚",
+            )
+
+    @discord.ui.button(label="Approve for Team", style=discord.ButtonStyle.success, custom_id="pulse_approve_button", emoji="🌟")
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = interaction.message.embeds[0]
+        user_id = extract_user_id_from_embed(embed)
+        if user_id is None:
+            await interaction.response.send_message(
+                "Couldn't find the applicant's user ID on this card — can't approve automatically.",
+                ephemeral=True,
+            )
+            return
+
+        role = interaction.guild.get_role(EVENT_TEAM_ROLE_ID)
+        member = interaction.guild.get_member(user_id)
+        if member is None:
+            try:
+                member = await interaction.guild.fetch_member(user_id)
+            except Exception:
+                member = None
+
+        role_added = False
+        if member and role:
+            try:
+                await member.add_roles(role, reason="Approved to Event Team via Pulse")
+                role_added = True
+            except discord.Forbidden:
+                print(f"[ERROR] Missing permission to add {role} to {user_id} — check role hierarchy.")
+            except Exception as e:
+                print(f"[ERROR] Could not add role to {user_id}: {e}")
+
+        embed.colour = 0xF1C40F
+        existing_footer = embed.footer.text if embed.footer else ""
+        if "Approved by" not in existing_footer:
+            embed.set_footer(text=f"{existing_footer} • Approved by {interaction.user}")
+        button.label = "Approved ★"
+        button.disabled = True
+        await interaction.response.edit_message(embed=embed, view=self)
+
+        if not role_added:
+            await interaction.followup.send(
+                "Note: I couldn't assign the Event Team role automatically (check EVENT_TEAM_ROLE_ID and that "
+                "Pulse's role sits above it in Server Settings → Roles). You may need to add it manually.",
+                ephemeral=True,
+            )
+
+        await dm_applicant(
+            user_id,
+            "🎉 Congrats — you've been approved to join the Klurge's Korner Event Team! Welcome aboard. "
+            "We'll be in touch soon with next steps.",
+        )
 
 
 @tree.command(name="post_application_panel", description="Post the Event Team application panel in this channel.")
@@ -578,6 +683,31 @@ async def post_application_panel(interaction: discord.Interaction):
     )
     await interaction.channel.send(embed=embed, view=ApplyPanelView())
     await interaction.response.send_message("Application panel posted!", ephemeral=True)
+
+
+@tree.command(name="approved_members", description="List everyone currently approved to the Event Team.")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def approved_members(interaction: discord.Interaction):
+    role = interaction.guild.get_role(EVENT_TEAM_ROLE_ID)
+    if role is None:
+        await interaction.response.send_message(
+            "Couldn't find the Event Team role — check EVENT_TEAM_ROLE_ID.",
+            ephemeral=True,
+        )
+        return
+
+    members = role.members
+    if not members:
+        await interaction.response.send_message("No one has been approved to the Event Team yet.", ephemeral=True)
+        return
+
+    lines = "\n".join(f"• {m.mention} ({m})" for m in members)
+    embed = discord.Embed(
+        title=f"Klurge's Korner Event Team ({len(members)})",
+        description=lines,
+        color=0xF1C40F,
+    )
+    await interaction.response.send_message(embed=embed)
 
 
 @tasks.loop(seconds=CHECK_INTERVAL_SECONDS)
