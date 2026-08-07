@@ -395,6 +395,12 @@ AGE_OPTIONS = ["Under 16", "16-17", "18+"]
 
 ACTIVITY_OPTIONS = ["Daily", "A few times a week", "Occasionally", "I mostly lurk"]
 
+# Remembers the most recently posted application panel (channel + message
+# ID) so /close_applications can find and close it without needing a link.
+# Lost on restart — /close_applications accepts a message link as a
+# fallback for that case.
+last_application_panel = {"channel_id": None, "message_id": None}
+
 
 class ApplicationModal(discord.ui.Modal, title="Event Team Application"):
     timezone = discord.ui.TextInput(
@@ -681,8 +687,65 @@ async def post_application_panel(interaction: discord.Interaction):
         ),
         color=0x9B59B6,
     )
-    await interaction.channel.send(embed=embed, view=ApplyPanelView())
+    msg = await interaction.channel.send(embed=embed, view=ApplyPanelView())
+    last_application_panel["channel_id"] = msg.channel.id
+    last_application_panel["message_id"] = msg.id
     await interaction.response.send_message("Application panel posted!", ephemeral=True)
+
+
+@tree.command(name="close_applications", description="Close the Event Team application panel so it can no longer be clicked.")
+@app_commands.describe(message_link="Optional — paste the panel's message link if it's not the most recent one posted (e.g. after a bot restart).")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def close_applications(interaction: discord.Interaction, message_link: str = None):
+    channel_id = None
+    message_id = None
+
+    if message_link:
+        match = re.search(r"/channels/\d+/(\d+)/(\d+)", message_link)
+        if not match:
+            await interaction.response.send_message("That doesn't look like a valid Discord message link.", ephemeral=True)
+            return
+        channel_id = int(match.group(1))
+        message_id = int(match.group(2))
+    else:
+        channel_id = last_application_panel["channel_id"]
+        message_id = last_application_panel["message_id"]
+
+    if not channel_id or not message_id:
+        await interaction.response.send_message(
+            "I don't have a record of the application panel (probably because the bot restarted since it was posted). "
+            "Right-click the panel message → Copy Message Link, then run this command again with that link pasted in "
+            "the message_link option.",
+            ephemeral=True,
+        )
+        return
+
+    channel = client.get_channel(channel_id)
+    if channel is None:
+        await interaction.response.send_message("Couldn't find that channel.", ephemeral=True)
+        return
+
+    try:
+        message = await channel.fetch_message(message_id)
+    except Exception as e:
+        await interaction.response.send_message(f"Couldn't find that message: {e}", ephemeral=True)
+        return
+
+    closed_embed = message.embeds[0] if message.embeds else discord.Embed()
+    closed_embed.title = "Applications Closed"
+    closed_embed.description = (
+        "Thanks to everyone who applied! We're no longer accepting new applications for the "
+        "Event Team right now. Keep an eye out in case we open it back up in the future. 💚"
+    )
+    closed_embed.colour = 0x95A5A6
+
+    closed_view = discord.ui.View(timeout=None)
+    closed_view.add_item(
+        discord.ui.Button(label="Applications Closed", style=discord.ButtonStyle.secondary, disabled=True, emoji="🔒")
+    )
+
+    await message.edit(embed=closed_embed, view=closed_view)
+    await interaction.response.send_message("Application panel closed.", ephemeral=True)
 
 
 @tree.command(name="approved_members", description="List everyone currently approved to the Event Team.")
