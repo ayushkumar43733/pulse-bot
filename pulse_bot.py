@@ -8,6 +8,9 @@ What this does:
   - When it detects a transition from "offline" -> "live", it sends an
     embed message to #live, pinging the Live Notification role, with a
     "Watch Stream" button.
+  - Runs an in-Discord Event Team application system: an "Apply Now"
+    button that walks members through a short application (dropdowns +
+    a popup form) and posts each submission into a private staff channel.
   - Designed to run 24/7 on a hosting service (e.g. Render).
 
 CONFIG: fill in / verify the values below. The bot token should be set
@@ -18,6 +21,7 @@ import os
 import html
 import requests
 import discord
+from discord import app_commands
 from discord.ext import tasks
 
 # =========================
@@ -84,6 +88,14 @@ ROTATING_STATUSES = [
     ("watching",   "Made by Ayush 💚"),
 ]
 
+# --- EVENT TEAM APPLICATION SYSTEM ---
+# REQUIRED before restarting, or the bot will fail to start:
+#   GUILD_ID                    -> right-click your server icon -> Copy Server ID
+#   APPLICATIONS_STAFF_CHANNEL_ID -> right-click your private staff channel -> Copy Channel ID
+# (Enable Developer Mode first: User Settings -> Advanced -> Developer Mode)
+GUILD_ID = int(os.environ.get("GUILD_ID", "PASTE_YOUR_SERVER_ID_HERE"))
+APPLICATIONS_STAFF_CHANNEL_ID = int(os.environ.get("APPLICATIONS_STAFF_CHANNEL_ID", "PASTE_YOUR_STAFF_CHANNEL_ID_HERE"))
+
 # =========================
 # END CONFIG
 # =========================
@@ -97,6 +109,7 @@ HEADERS_KICK = {
 
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
 
 # Tracks whether Klurge was live on the previous check
 was_live = False
@@ -352,6 +365,221 @@ async def set_rotating_status():
     await client.change_presence(status=discord.Status.online, activity=activity)
 
 
+# =========================
+# EVENT TEAM APPLICATION SYSTEM
+# =========================
+# Flow: "Apply Now" button (persistent, survives restarts) -> 3 dropdowns
+# (roles / age / activity) -> "Continue" opens a popup with the written
+# questions -> on submit, posts a formatted card into the staff channel.
+#
+# Discord's popup forms ("modals") only support up to 5 text fields, which
+# is why the multiple-choice questions live in dropdowns BEFORE the popup,
+# rather than trying to cram all ~10 questions into one screen.
+
+ROLE_OPTIONS = [
+    ("Event Host / Customs Coordinator", "event_host"),
+    ("Greeter / Activation Lead", "greeter"),
+    ("Content Runner", "content_runner"),
+    ("Not sure - open to anything", "not_sure"),
+]
+
+AGE_OPTIONS = ["Under 16", "16-17", "18+"]
+
+ACTIVITY_OPTIONS = ["Daily", "A few times a week", "Occasionally", "I mostly lurk"]
+
+
+class ApplicationModal(discord.ui.Modal, title="Event Team Application"):
+    timezone = discord.ui.TextInput(
+        label="Your timezone",
+        placeholder="e.g. IST, EST, GMT+5:30",
+        max_length=100,
+    )
+    availability = discord.ui.TextInput(
+        label="Days/times you're generally free",
+        placeholder="e.g. Weekday evenings IST, weekends anytime",
+        max_length=200,
+    )
+    why_join = discord.ui.TextInput(
+        label="Why do you want to join the event team?",
+        style=discord.TextStyle.paragraph,
+        max_length=1000,
+    )
+    experience = discord.ui.TextInput(
+        label="Relevant past experience (optional)",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=500,
+    )
+    anything_else = discord.ui.TextInput(
+        label="Anything else? (optional)",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=500,
+    )
+
+    def __init__(self, roles_selected, age_selected, activity_selected):
+        super().__init__()
+        self.roles_selected = roles_selected
+        self.age_selected = age_selected
+        self.activity_selected = activity_selected
+
+    async def on_submit(self, interaction: discord.Interaction):
+        staff_channel = client.get_channel(APPLICATIONS_STAFF_CHANNEL_ID)
+        if staff_channel is None:
+            print(f"[ERROR] Could not find applications staff channel {APPLICATIONS_STAFF_CHANNEL_ID}")
+            await interaction.response.send_message(
+                "Thanks for applying! (There's a setup issue on our end — please let an admin know.)",
+                ephemeral=True,
+            )
+            return
+
+        member = interaction.user
+        joined_str = "Unknown"
+        if isinstance(member, discord.Member) and member.joined_at:
+            joined_str = discord.utils.format_dt(member.joined_at, style="R")
+
+        embed = discord.Embed(
+            title="New Event Team Application",
+            color=0x9B59B6,
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.set_author(name=str(member), icon_url=member.display_avatar.url)
+        embed.add_field(name="Applicant", value=f"{member.mention} ({member})", inline=False)
+        embed.add_field(name="Member since", value=joined_str, inline=True)
+        embed.add_field(name="Age range", value=self.age_selected or "Not answered", inline=True)
+        embed.add_field(name="Activity level", value=self.activity_selected or "Not answered", inline=True)
+        embed.add_field(name="Role(s) interested", value=self.roles_selected or "Not answered", inline=False)
+        embed.add_field(name="Timezone", value=str(self.timezone), inline=True)
+        embed.add_field(name="Availability", value=str(self.availability), inline=True)
+        embed.add_field(name="Why they want to join", value=str(self.why_join), inline=False)
+        if str(self.experience).strip():
+            embed.add_field(name="Past experience", value=str(self.experience), inline=False)
+        if str(self.anything_else).strip():
+            embed.add_field(name="Anything else", value=str(self.anything_else), inline=False)
+        embed.set_footer(text=f"User ID: {member.id}")
+
+        await staff_channel.send(embed=embed, view=ReviewButtonView())
+        print(f"[INFO] New event team application received from {member} ({member.id}).")
+
+        await interaction.response.send_message(
+            "Thanks for applying to the Klurge's Korner event team! We'll review it and follow up over DM soon. 💚",
+            ephemeral=True,
+        )
+
+
+class ApplicationSelectView(discord.ui.View):
+    """Shown right after clicking 'Apply Now'. Collects role/age/activity
+    before opening the modal for the written questions. Not persistent —
+    it's a short-lived step (10 min timeout), so it doesn't need to
+    survive a bot restart."""
+
+    def __init__(self):
+        super().__init__(timeout=600)
+        self.roles_selected = None
+        self.age_selected = None
+        self.activity_selected = None
+
+    @discord.ui.select(
+        placeholder="Which role(s) interest you? (pick 1-4)",
+        min_values=1,
+        max_values=4,
+        options=[discord.SelectOption(label=label, value=value) for label, value in ROLE_OPTIONS],
+        row=0,
+    )
+    async def select_roles(self, interaction: discord.Interaction, select: discord.ui.Select):
+        labels = [label for label, value in ROLE_OPTIONS if value in select.values]
+        self.roles_selected = ", ".join(labels)
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.select(
+        placeholder="Your age range",
+        min_values=1,
+        max_values=1,
+        options=[discord.SelectOption(label=age) for age in AGE_OPTIONS],
+        row=1,
+    )
+    async def select_age(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.age_selected = select.values[0]
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.select(
+        placeholder="How active are you in the server currently?",
+        min_values=1,
+        max_values=1,
+        options=[discord.SelectOption(label=level) for level in ACTIVITY_OPTIONS],
+        row=2,
+    )
+    async def select_activity(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.activity_selected = select.values[0]
+        await interaction.response.edit_message(view=self)
+
+    @discord.ui.button(label="Continue →", style=discord.ButtonStyle.success, row=3)
+    async def continue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not (self.roles_selected and self.age_selected and self.activity_selected):
+            await interaction.response.send_message(
+                "Please answer all three questions above before continuing.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(
+            ApplicationModal(self.roles_selected, self.age_selected, self.activity_selected)
+        )
+
+
+class ApplyPanelView(discord.ui.View):
+    """Persistent view — the 'Apply Now' button. Registered in on_ready()
+    so it keeps working across bot restarts, on every message it was
+    ever posted to."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Apply Now", style=discord.ButtonStyle.success, custom_id="pulse_apply_now_button", emoji="📋")
+    async def apply_now(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "Answer these three quick questions, then hit **Continue** to finish your application:",
+            view=ApplicationSelectView(),
+            ephemeral=True,
+        )
+
+
+class ReviewButtonView(discord.ui.View):
+    """Persistent view — 'Mark Reviewed' button attached to each
+    application card in the staff channel."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Mark Reviewed", style=discord.ButtonStyle.secondary, custom_id="pulse_mark_reviewed_button", emoji="✅")
+    async def mark_reviewed(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = interaction.message.embeds[0]
+        embed.colour = 0x2ECC71
+        existing_footer = embed.footer.text if embed.footer else ""
+        if "Reviewed by" not in existing_footer:
+            embed.set_footer(text=f"{existing_footer} • Reviewed by {interaction.user}")
+        button.label = "Reviewed ✓"
+        button.disabled = True
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+@tree.command(name="post_application_panel", description="Post the Event Team application panel in this channel.")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def post_application_panel(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="Join the Klurge's Korner Event Team 💚",
+        description=(
+            "We're building a small volunteer team to help run Klurge's Korner — starting with "
+            "weekly Valorant customs nights, plus keeping the server active day to day.\n\n"
+            "This is a **volunteer, unpaid** role. Everyone starts with a short trial period before "
+            "a permanent spot on the team. Takes about 2 minutes to apply.\n\n"
+            "Click below to get started!"
+        ),
+        color=0x9B59B6,
+    )
+    await interaction.channel.send(embed=embed, view=ApplyPanelView())
+    await interaction.response.send_message("Application panel posted!", ephemeral=True)
+
+
 @tasks.loop(seconds=CHECK_INTERVAL_SECONDS)
 async def check_kick_status():
     global was_live
@@ -442,6 +670,19 @@ async def on_ready():
     global was_live, was_youtube_live, last_seen_video_id
 
     print(f"[INFO] Logged in as {client.user} ({client.user.id})")
+
+    # --- Register persistent application-system views ---
+    # This makes the "Apply Now" and "Mark Reviewed" buttons keep working
+    # on old messages even after the bot restarts.
+    client.add_view(ApplyPanelView())
+    client.add_view(ReviewButtonView())
+
+    # --- Sync slash commands to the server (guild sync = near-instant) ---
+    try:
+        synced = await tree.sync(guild=discord.Object(id=GUILD_ID))
+        print(f"[INFO] Synced {len(synced)} slash command(s).")
+    except Exception as e:
+        print(f"[ERROR] Failed to sync slash commands: {e}")
 
     # --- Initialize current state WITHOUT sending notifications ---
     # This prevents duplicate "just went live" pings if the bot restarts
