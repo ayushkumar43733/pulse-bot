@@ -625,6 +625,18 @@ class ReviewButtonView(discord.ui.View):
     @discord.ui.button(label="Approve for Team", style=discord.ButtonStyle.success, custom_id="pulse_approve_button", emoji="🌟")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = interaction.message.embeds[0]
+
+        # Require this card to be marked Reviewed first. Checked off the
+        # embed's own footer text (not an in-memory flag) so this still
+        # holds even if the bot restarted since it was reviewed.
+        existing_footer = embed.footer.text if embed.footer else ""
+        if "Reviewed by" not in existing_footer:
+            await interaction.response.send_message(
+                "Please click **Mark Reviewed** first before approving this applicant.",
+                ephemeral=True,
+            )
+            return
+
         user_id = extract_user_id_from_embed(embed)
         if user_id is None:
             await interaction.response.send_message(
@@ -642,17 +654,25 @@ class ReviewButtonView(discord.ui.View):
                 member = None
 
         role_added = False
-        if member and role:
+        role_error = None
+        if role is None:
+            role_error = f"Couldn't find a role with ID `{EVENT_TEAM_ROLE_ID}` in this server — double check the EVENT_TEAM_ROLE_ID variable."
+        elif member is None:
+            role_error = "Couldn't find this applicant as a current server member (may have left)."
+        else:
             try:
                 await member.add_roles(role, reason="Approved to Event Team via Pulse")
                 role_added = True
             except discord.Forbidden:
-                print(f"[ERROR] Missing permission to add {role} to {user_id} — check role hierarchy.")
+                role_error = (
+                    f"I don't have permission to assign {role.mention}. Position above it isn't enough on its own — "
+                    "check that Pulse's role also has the **Manage Roles** permission toggled ON "
+                    "(Server Settings → Roles → Pulse → Permissions tab)."
+                )
             except Exception as e:
-                print(f"[ERROR] Could not add role to {user_id}: {e}")
+                role_error = f"Unexpected error: {e}"
 
         embed.colour = 0xF1C40F
-        existing_footer = embed.footer.text if embed.footer else ""
         if "Approved by" not in existing_footer:
             embed.set_footer(text=f"{existing_footer} • Approved by {interaction.user}")
         button.label = "Approved ★"
@@ -660,11 +680,7 @@ class ReviewButtonView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
         if not role_added:
-            await interaction.followup.send(
-                "Note: I couldn't assign the Event Team role automatically (check EVENT_TEAM_ROLE_ID and that "
-                "Pulse's role sits above it in Server Settings → Roles). You may need to add it manually.",
-                ephemeral=True,
-            )
+            await interaction.followup.send(f"⚠️ {role_error} You may need to add the role manually.", ephemeral=True)
 
         await dm_applicant(
             user_id,
