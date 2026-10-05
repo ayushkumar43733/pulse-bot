@@ -24,6 +24,7 @@ import requests
 import discord
 from discord import app_commands
 from discord.ext import tasks
+from honeypot import install_honeypot
 
 # =========================
 # CONFIG
@@ -118,6 +119,7 @@ intents = discord.Intents.default()
 intents.members = True  # required for /approved_members to see who has the role
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
+honeypot = install_honeypot(client, tree, GUILD_ID)
 
 # Tracks whether Klurge was live on the previous check
 was_live = False
@@ -884,6 +886,7 @@ async def on_ready():
     # --- Register persistent application-system views ---
     # This makes the "Apply Now" and "Mark Reviewed" buttons keep working
     # on old messages even after the bot restarts.
+    honeypot.appeals.register_views()
     client.add_view(ApplyPanelView())
     client.add_view(ReviewButtonView())
 
