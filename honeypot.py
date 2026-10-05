@@ -7,7 +7,7 @@ from datetime import timedelta
 
 import discord
 from discord import app_commands
-from honeypot_appeals import Appeals
+from honeypot_appeals import Appeals, member_embed
 
 log = logging.getLogger(__name__)
 
@@ -25,12 +25,17 @@ class Honeypot:
         self.inflight = set()
         self.appeals = Appeals(self, os.getenv("HONEYPOT_DB_PATH", "honeypot.sqlite3"))
 
-    async def report(self, guild, text):
+    async def report(self, guild, text, *, member=None, title="Moderation alert", color=0xE67E22, expires=None, channel_id=None):
         log.warning("Honeypot guild=%s: %s", guild.id, text)
         channel = guild.get_channel(self.log_channel_id)
         if channel is not None:
             try:
-                await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
+                embed = member_embed(title, text, member, color)
+                if channel_id is not None:
+                    embed.add_field(name="Channel", value=f"<#{channel_id}>")
+                if expires is not None:
+                    embed.add_field(name="Timeout expires", value=f"{discord.utils.format_dt(expires, 'F')}\n{discord.utils.format_dt(expires, 'R')}", inline=False)
+                await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
             except discord.HTTPException:
                 log.exception("Unable to send honeypot staff log")
 
@@ -55,10 +60,10 @@ class Honeypot:
         try:
             me = guild.me
             if me is None or member.top_role >= me.top_role:
-                await self.report(guild, f"Cannot moderate user {member.id}: check Pulse's role hierarchy. Message {message.id}.")
+                await self.report(guild, f"Cannot moderate user {member.id}: check Pulse's role hierarchy. Message {message.id}.", member=member)
                 return
             if not me.guild_permissions.moderate_members:
-                await self.report(guild, f"Cannot timeout user {member.id}: Pulse needs Moderate Members.")
+                await self.report(guild, f"Cannot timeout user {member.id}: Pulse needs Moderate Members.", member=member)
                 return
             until = discord.utils.utcnow() + timedelta(days=7)
             applied = member.timed_out_until is None or member.timed_out_until < until
@@ -70,16 +75,18 @@ class Honeypot:
                     await self.appeals.notify(member, until)
                 except Exception:
                     log.exception("Could not save or deliver timeout appeal")
-                    await self.report(guild, f"Timeout applied to user {member.id}, but appeal setup failed. Staff assistance required.")
+                    await self.report(guild, f"Timeout applied to user {member.id}, but appeal setup failed. Staff assistance required.", member=member)
             try:
                 await message.delete()
             except discord.NotFound:
                 pass
             except discord.HTTPException:
                 outcome += " Trigger message could not be deleted; check Manage Messages."
-            await self.report(guild, f"{outcome} Channel {message.channel.id}; message {message.id}.")
+            await self.report(guild, f"{outcome}\nTrigger message: `{message.id}`", member=member,
+                              title="7-day timeout applied" if applied else "Existing timeout preserved",
+                              expires=until if applied else member.timed_out_until, channel_id=message.channel.id)
         except discord.HTTPException as exc:
-            await self.report(guild, f"Moderation failed for user {member.id}: {type(exc).__name__} (code {exc.code}). Message {message.id}.")
+            await self.report(guild, f"Moderation failed for user {member.id}: {type(exc).__name__} (code {exc.code}). Message {message.id}.", member=member)
         finally:
             # Cover already-queued duplicate message events without growing permanent state.
             asyncio.get_running_loop().call_later(10, self.inflight.discard, key)
@@ -95,18 +102,25 @@ class Honeypot:
         required.append("moderate_members")
         missing = [name for name in required if not getattr(permissions, name)]
         staff = interaction.guild.get_channel(self.log_channel_id)
-        if staff is None or not staff.permissions_for(me).send_messages:
+        if staff is None or not all(getattr(staff.permissions_for(me), p) for p in ("view_channel", "send_messages", "embed_links")):
             missing.append("access to staff log channel")
         if missing:
             await interaction.response.send_message("Missing permissions: " + ", ".join(missing), ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True)
-        await interaction.channel.send(embed=discord.Embed(
+        embed = discord.Embed(
             title="DO NOT SEND MESSAGES IN THIS CHANNEL",
             description=("This channel catches automated spam from compromised accounts. "
                          "Sending any message here, including an image or link, results in **a 7-day timeout**. "
                          "Pulse will DM you an appeal button for use after account recovery. Staff can approve early removal; otherwise the timeout expires automatically. Use the other channels to chat."),
-            color=0xF1C40F), allowed_mentions=discord.AllowedMentions.none())
+            color=0xF1C40F)
+        embed.set_author(name=interaction.guild.name)
+        if interaction.guild.icon:
+            embed.set_author(name=interaction.guild.name, icon_url=interaction.guild.icon.url)
+            embed.set_thumbnail(url=interaction.guild.icon.url)
+        embed.set_image(url="https://raw.githubusercontent.com/ayushkumar43733/pulse-bot/main/klurge_banner.webp")
+        embed.set_footer(text="Pulse • Server security")
+        await interaction.channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
         await interaction.followup.send("Warning panel posted. Keep it visible to members.", ephemeral=True)
 
 
