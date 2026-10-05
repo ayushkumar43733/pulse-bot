@@ -11,6 +11,20 @@ import discord
 log = logging.getLogger(__name__)
 
 
+def member_embed(title, description, member=None, color=0xF1C40F):
+    """Consistent moderation cards without enabling mention notifications."""
+    embed = discord.Embed(title=title, description=description, color=color,
+                          timestamp=discord.utils.utcnow())
+    embed.set_footer(text="Pulse • Server security")
+    if member is not None:
+        embed.set_author(name=f"{member.display_name} (@{member.name})"[:256],
+                         icon_url=str(member.display_avatar.url))
+        embed.set_thumbnail(url=str(member.display_avatar.url))
+        embed.add_field(name="Member", value=f"<@{member.id}>", inline=True)
+        embed.add_field(name="User ID", value=f"`{member.id}`", inline=True)
+    return embed
+
+
 class CaseStore:
     def __init__(self, path):
         self.path = path
@@ -84,7 +98,7 @@ class Appeals:
         except discord.HTTPException:
             await self.guard.report(member.guild,
                 f"User {member.id} timed out, but the appeal DM could not be delivered. "
-                "Staff must help them appeal through another contact route.")
+                "Staff must help them appeal through another contact route.", member=member, title="Appeal DM unavailable")
 
     async def active_member(self, case):
         guild = self.guard.client.get_guild(case["guild_id"])
@@ -111,10 +125,10 @@ class Appeals:
                 channel = member.guild.get_channel(self.guard.log_channel_id)
                 if channel is None:
                     raise ValueError("The staff channel is unavailable. Please contact staff or try again later.")
-                embed = discord.Embed(title="Timeout recovery appeal", color=0xF1C40F,
-                    description=discord.utils.escape_markdown(explanation))
-                embed.add_field(name="User ID", value=str(member.id))
-                embed.add_field(name="Expires", value=case["expires"])
+                embed = member_embed("Recovery appeal • Awaiting review",
+                    discord.utils.escape_markdown(explanation), member)
+                expires = datetime.fromisoformat(case["expires"])
+                embed.add_field(name="Timeout expires", value=f"{discord.utils.format_dt(expires, chr(70))}\n{discord.utils.format_dt(expires, chr(82))}", inline=False)
                 embed.add_field(name="Review", value="Verify account recovery before approving. Approval removes this timeout.", inline=False)
                 embed.set_footer(text=f"Pulse case: {case_id}")
                 message = await channel.send(embed=embed, view=ReviewView(self),
@@ -156,18 +170,25 @@ class Appeals:
                 await interaction.followup.send(text, ephemeral=True)
                 return
             embed = interaction.message.embeds[0]
-            embed.add_field(name="Decision", value=f"{status.title()} by user {interaction.user.id}", inline=False)
+            embed.title = "Recovery appeal • " + ("Approved" if approve else "Declined")
+            embed.colour = 0x2ECC71 if approve else 0xE74C3C
+            embed.add_field(name="Reviewed by", value=f"<@{interaction.user.id}> (`{interaction.user.id}`)", inline=False)
             try:
                 await interaction.message.edit(embed=embed, view=None)
             except discord.HTTPException:
                 log.exception("Could not update appeal card %s", case_id)
-            notice = ("Your recovery appeal was approved. Your timeout has been removed."
-                      if approve else "Your recovery appeal was declined. Your timeout remains and will expire automatically.")
-            try:
-                await member.send(notice, allowed_mentions=discord.AllowedMentions.none())
-            except discord.HTTPException:
-                notice = "Decision saved, but the user could not be notified by DM."
-            await self.guard.report(member.guild, f"Appeal {case_id} for user {member.id}: {status} by {interaction.user.id}.")
+            notice = "No rejection DM sent; the timeout remains in place."
+            if approve:
+                try:
+                    await member.send("Your recovery appeal was approved. Your timeout has been removed.",
+                                      allowed_mentions=discord.AllowedMentions.none())
+                    notice = "Timeout removed and approval DM sent."
+                except discord.HTTPException:
+                    notice = "Timeout removed, but the approval DM could not be delivered."
+            await self.guard.report(member.guild,
+                f"**Case #{case_id}** • Reviewed by <@{interaction.user.id}>\n{notice}",
+                member=member, title="Appeal approved" if approve else "Appeal declined",
+                color=0x2ECC71 if approve else 0xE74C3C)
         await interaction.followup.send(f"Appeal {status}. {notice}", ephemeral=True)
 
 
